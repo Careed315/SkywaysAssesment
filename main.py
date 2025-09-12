@@ -18,14 +18,6 @@ import os
 import sys
 from typing import Dict, List, Optional, Tuple
 
-# Import text detection functionality
-try:
-    from text_detector import create_text_detector
-    TEXT_DETECTION_AVAILABLE = True
-except ImportError:
-    TEXT_DETECTION_AVAILABLE = False
-    print("Text detection module not available. Manual labeling only.")
-
 
 class TrackerManager:
     """Manages OpenCV tracker functionality."""
@@ -179,7 +171,7 @@ class DisplayManager:
         self.prompt = prompt
     
     def create_text_overlay(self, frame, current_frame: int, total_frames: int, 
-                           label_mode: bool, fix_mode: bool, has_prediction: bool, has_text_detector: bool = False):
+                           label_mode: bool, fix_mode: bool, has_prediction: bool):
         """Add text overlay with instructions and frame info."""
         frame_text = f"Frame: {current_frame + 1}/{total_frames}"
         
@@ -187,7 +179,7 @@ class DisplayManager:
         controls = []
         
         if label_mode:
-            mode_text = " (MANUAL LABEL MODE - Click and drag from center)"
+            mode_text = " (LABEL MODE - Click and drag from center)"
             controls.extend([
                 "Mouse - Click & drag (scales from center)",
                 "Q/q - Quit and save"
@@ -208,15 +200,9 @@ class DisplayManager:
                     "A/a - Accept prediction",
                     "F/f - Fix prediction manually"
                 ])
-                # If we have text detector and tracker is active, allow re-detection
-                if has_text_detector:
-                    controls.append("L/l - Re-run text detection")
             else:
-                # Show available detection methods
-                if has_text_detector:
-                    controls.append("L/l - Run text detection")
-                else:
-                    controls.append("L/l - Enter manual label mode")
+                # Only show label mode if no prediction is available
+                controls.append("L/l - Enter label mode")
             
             # These are always available when not in interactive modes
             controls.extend([
@@ -278,7 +264,7 @@ class DisplayManager:
     def render_and_show(self, raw_frame, current_frame: int, total_frames: int,
                        label_mode: bool, fix_mode: bool, has_prediction: bool,
                        predicted_box=None, current_boxes=None, 
-                       drawing_box=None, start_point=None, is_drawing=False, has_text_detector=False):
+                       drawing_box=None, start_point=None, is_drawing=False):
         """Single method to render all overlays and display the frame."""
         # Start with a copy of the raw frame
         display_frame = raw_frame.copy()
@@ -286,7 +272,7 @@ class DisplayManager:
         # Add text overlay
         display_frame = self.create_text_overlay(
             display_frame, current_frame, total_frames,
-            label_mode, fix_mode, has_prediction, has_text_detector
+            label_mode, fix_mode, has_prediction
         )
         
         # Add all boxes
@@ -304,7 +290,7 @@ class VideoAnnotator:
     
     def __init__(self, video_path: str, prompt: Optional[str] = None, annotations_file: Optional[str] = None):
         self.video_path = video_path
-        self.prompt = prompt
+        self.prompt = prompt or "Choose action for this frame:"
         
         # Generate annotations file name if not provided
         if annotations_file is None:
@@ -314,18 +300,7 @@ class VideoAnnotator:
         # Initialize managers
         self.tracker_manager = TrackerManager()
         self.annotation_manager = AnnotationManager(annotations_file)
-        
-        # Initialize text detector if prompt provided for AI detection
-        if prompt and TEXT_DETECTION_AVAILABLE:
-            self.text_detector = create_text_detector(prompt)
-            display_prompt = f"Detecting: {prompt}"
-            self.text_prompt = prompt  # Store for detection
-        else:
-            self.text_detector = None
-            display_prompt = prompt or "Choose action for this frame:"
-            self.text_prompt = None
-            
-        self.display_manager = DisplayManager("Video Frame Annotator", display_prompt)
+        self.display_manager = DisplayManager("Video Frame Annotator", self.prompt)
         
         # Video properties
         self.current_frame = 0
@@ -427,37 +402,8 @@ class VideoAnnotator:
             current_boxes=self.current_boxes,
             drawing_box=drawing_box,
             start_point=self.start_point,
-            is_drawing=self.drawing,
-            has_text_detector=self.text_detector is not None and hasattr(self.text_detector, 'is_available') and self.text_detector.is_available
+            is_drawing=self.drawing
         )
-    
-    def run_text_detection(self):
-        """Run text-based detection on current frame."""
-        if not self.text_detector or not hasattr(self.text_detector, 'is_available') or not self.text_detector.is_available:
-            print("Text detection not available.")
-            return False
-        
-        frame = self.get_current_frame()
-        if frame is None:
-            return False
-        
-        print(f"Running text detection for: '{self.text_prompt}'...")
-        detected_box = self.text_detector.get_best_detection(frame)
-        
-        if detected_box:
-            print(f"Detection found at: {detected_box}")
-            
-            # Initialize tracker with detected box
-            self.tracker_manager.initialize(frame, detected_box)
-            
-            # Auto-accept the detection and add annotation
-            self.annotation_manager.add_box_annotation(detected_box)
-            print(f"Frame {self.current_frame + 1}: AUTO-LABELED via text detection")
-            
-            return True
-        else:
-            print("No objects detected matching the prompt.")
-            return False
     
     def handle_mouse_press(self, x, y):
         """Handle mouse button press."""
@@ -565,50 +511,16 @@ class VideoAnnotator:
         return False
     
     def handle_key_label(self):
-        """Handle label mode key press or text detection trigger."""
-        # If we have text detection capability
-        if self.text_detector and hasattr(self.text_detector, 'is_available') and self.text_detector.is_available:
-            # If there's a prediction available, re-run text detection
-            if self.tracker_manager.predicted_box:
-                print("Re-running text detection...")
-                success = self.run_text_detection()
-                if success:
-                    # Check if we should quit after moving to next frame
-                    if not self.next_frame():
-                        print("All frames completed. Quitting...")
-                        return False
-                    self.refresh_display()
-                else:
-                    print("No detection found. Use F/f to fix manually.")
-            else:
-                # No prediction, run initial text detection
-                print("Running initial text detection...")
-                success = self.run_text_detection()
-                if success:
-                    # Check if we should quit after moving to next frame
-                    if not self.next_frame():
-                        print("All frames completed. Quitting...")
-                        return False
-                    self.refresh_display()
-                else:
-                    # Fall back to manual labeling
-                    self.label_mode = True
-                    self.current_boxes = []
-                    print(f"Frame {self.current_frame + 1}: ENTERING MANUAL LABEL MODE")
-                    self.refresh_display()
+        """Handle label mode key press."""
+        if not self.label_mode and not self.tracker_manager.predicted_box:
+            self.label_mode = True
+            self.current_boxes = []
+            print(f"Frame {self.current_frame + 1}: ENTERING LABEL MODE")
+            self.refresh_display()
+        elif self.tracker_manager.predicted_box:
+            print("Prediction available. Use A/a to accept or F/f to fix.")
         else:
-            # No text detection, use manual labeling
-            if not self.label_mode and not self.tracker_manager.predicted_box:
-                self.label_mode = True
-                self.current_boxes = []
-                print(f"Frame {self.current_frame + 1}: ENTERING LABEL MODE")
-                self.refresh_display()
-            elif self.tracker_manager.predicted_box:
-                print("Prediction available. Use A/a to accept or F/f to fix.")
-            else:
-                print("Already in label mode.")
-        
-        return True
+            print("Already in label mode.")
     
     def handle_key_accept(self):
         """Handle accept prediction key press. Returns False if should quit."""
@@ -751,21 +663,9 @@ class VideoAnnotator:
         print(f"OpenCV version: {cv2.__version__}")
         print("Using CSRT tracker for object tracking.")
         
-        # Text detection information
-        if self.text_detector and hasattr(self.text_detector, 'is_available') and self.text_detector.is_available:
-            print(f"✓ AI Text Detection: ENABLED")
-            print(f"✓ Detection prompt: '{self.text_prompt}'")
-            model_info = self.text_detector.get_model_info()
-            print(f"✓ Using device: {model_info.get('device', 'N/A')}")
-        else:
-            print("✗ AI Text Detection: DISABLED (manual labeling only)")
-        
         print()
         print("Use keyboard shortcuts to annotate frames:")
-        if self.text_detector and hasattr(self.text_detector, 'is_available') and self.text_detector.is_available:
-            print("L/l - Run AI text detection (or re-run if prediction available)")
-        else:
-            print("L/l - Enter manual label mode (click & drag from center)")
+        print("L/l - Enter label mode (click & drag from center)")
         print("A/a - Accept tracker prediction (when available)")
         print("F/f - Fix tracker prediction (when available)")
         print("S/s - Skip, I/i - Invisible, Q/q - Quit")
@@ -800,21 +700,12 @@ class VideoAnnotator:
 def main():
     """Main entry point for the CLI tool."""
     parser = argparse.ArgumentParser(
-        description="Video Frame Annotation Tool with AI-powered Text Detection",
-        epilog="""Examples:
-  Manual labeling only:
-    python main.py video.mp4
-    python main.py video.mp4 --annotations output.json
-  
-  AI text detection mode:
-    python main.py video.mp4 --prompt 'person with red shirt'
-    python main.py video.mp4 --prompt 'blue car' --annotations cars.annotations
-    python main.py video.mp4 --prompt 'dog running'"""
+        description="Video Frame Annotation Tool",
+        epilog="Example: python main.py video.mp4 --prompt 'Label objects:' --annotations output.json"
     )
     
     parser.add_argument("video_path", help="Path to the video file to annotate")
-    parser.add_argument("--prompt", type=str, 
-                       help="Text prompt for AI object detection (e.g., 'person with red shirt', 'blue car'). If not provided, uses manual labeling mode.")
+    parser.add_argument("--prompt", type=str, help="Custom prompt text to display")
     parser.add_argument("--annotations", type=str, help="Path to annotations file")
     
     args = parser.parse_args()
