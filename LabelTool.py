@@ -1,26 +1,155 @@
 #!/usr/bin/env python3
-"""
-Video Frame Annotation CLI Tool
-
-Usage: python main.py videoPath.mp4 [--prompt "Custom prompt"] [--annotations pathToAnnotationsFile.annotations]
-
-Features:
-- Display video frames using OpenCV
-- Three actions per frame: Label (L/l), Skip (S/s), Invisible (I/i)
-- Quit with Q/q
-- Frame navigation with keyboard shortcuts
-- Optional annotations file support
-"""
+# Video Frame Annotation CLI Tool
+#
+# Usage: python main.py videoPath.mp4 [--prompt "Custom prompt"] [--annotations pathToAnnotationsFile.annotations]
+#
+# Features:
+# - Display video frames using OpenCV
+# - Three actions per frame: Label (L/l), Skip (S/s), Invisible (I/i)
+# - Quit with Q/q
+# - Frame navigation with keyboard shortcuts
+# - Optional annotations file support
 
 import argparse
 import cv2
 import os
 import sys
+import time
 from typing import Dict, List, Optional, Tuple
+from enum import Enum
+
+
+class ActionType(Enum):
+    # Define all possible user actions
+    ENTER_LABEL_MODE = "enter_label_mode"
+    DRAW_BOX = "draw_box"
+    ACCEPT_PREDICTION = "accept_prediction"
+    FIX_PREDICTION = "fix_prediction"
+    SKIP_FRAME = "skip_frame"
+    MARK_INVISIBLE = "mark_invisible"
+    QUIT = "quit"
+
+
+class InputHandler:
+    # Handle all user input (mouse, keyboard) and translate to high-level actions
+    
+    def __init__(self, action_callback):
+        self.action_callback = action_callback
+        
+        # Mouse drawing state
+        self.drawing = False
+        self.start_point = None
+        self.end_point = None
+    
+    def handle_mouse_events(self, event, x, y, flags, param):
+        # Handle mouse events and translate to actions
+        if event == cv2.EVENT_LBUTTONDOWN:
+            self.handle_mouse_press(x, y)
+        elif event == cv2.EVENT_MOUSEMOVE:
+            self.handle_mouse_move(x, y)
+        elif event == cv2.EVENT_LBUTTONUP:
+            self.handle_mouse_release(x, y)
+    
+    def handle_mouse_press(self, x, y):
+        # Handle mouse button press
+        self.drawing = True
+        self.start_point = (x, y)
+        self.end_point = (x, y)
+        # Notify that drawing started (for visual feedback)
+        self.action_callback("DRAWING_STARTED", {"point": (x, y)})
+    
+    def handle_mouse_move(self, x, y):
+        # Handle mouse movement while drawing
+        if not self.drawing:
+            return
+        
+        # Always update the endpoint for accurate final result
+        self.end_point = (x, y)
+        
+        # Throttle drawing updates to ~60 FPS for smooth performance
+        current_time = time.time() * 1000  # Convert to milliseconds
+        if not hasattr(self, 'last_draw_update_time'):
+            self.last_draw_update_time = 0
+        
+        time_since_last_update = current_time - self.last_draw_update_time
+        if time_since_last_update >= 16.67:  # ~60 FPS (16.67ms between updates)
+            self.last_draw_update_time = current_time
+            
+            # Emit drawing update for visual feedback
+            self.action_callback("DRAWING_UPDATED", {
+                "start": self.start_point,
+                "end": self.end_point
+            })
+    
+    def handle_mouse_release(self, x, y):
+        # Handle mouse button release
+        if not self.drawing:
+            return
+        
+        self.drawing = False
+        self.end_point = (x, y)
+        
+        # Always emit draw action - validation happens in the handler
+        if self.start_point and self.end_point:
+            self.action_callback(ActionType.DRAW_BOX.value, {
+                "start": self.start_point,
+                "end": self.end_point
+            })
+        
+        # Reset drawing state
+        self.start_point = None
+        self.end_point = None
+    
+    def handle_key_input(self, key):
+        # Handle keyboard input and translate to actions
+        key_mappings = {
+            ord('q'): ActionType.QUIT,
+            ord('Q'): ActionType.QUIT,
+            ord('l'): ActionType.ENTER_LABEL_MODE,
+            ord('L'): ActionType.ENTER_LABEL_MODE,
+            ord('a'): ActionType.ACCEPT_PREDICTION,
+            ord('A'): ActionType.ACCEPT_PREDICTION,
+            ord('f'): ActionType.FIX_PREDICTION,
+            ord('F'): ActionType.FIX_PREDICTION,
+            ord('s'): ActionType.SKIP_FRAME,
+            ord('S'): ActionType.SKIP_FRAME,
+            ord('i'): ActionType.MARK_INVISIBLE,
+            ord('I'): ActionType.MARK_INVISIBLE,
+        }
+        
+        if key in key_mappings:
+            action_type = key_mappings[key]
+            self.action_callback(action_type.value, {})
+            return True
+        else:
+            # Unknown key
+            self.action_callback("UNKNOWN_KEY", {"key": key})
+            return False
+    
+    def process_input_events(self, window_name):
+        # Process input events (keyboard) using non-blocking pollKey
+        # Check window closure first
+        try:
+            if cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
+                self.action_callback(ActionType.QUIT.value, {})
+                return False
+        except cv2.error:
+            # Window was destroyed
+            self.action_callback(ActionType.QUIT.value, {})
+            return False
+        
+        # Poll for key press (non-blocking)
+        key = cv2.pollKey() & 0xFF
+        
+        if key != 255:  # Key was pressed
+            return self.handle_key_input(key)
+        
+        # No key pressed, continue processing
+        return True
 
 
 class TrackerManager:
-    """Manages OpenCV tracker functionality."""
+    # Manages OpenCV tracker functionality.
     
     def __init__(self):
         self.tracker = None
@@ -29,11 +158,11 @@ class TrackerManager:
     
     
     def _create_tracker(self):
-        """Create a CSRT tracker instance."""
+        # Create a CSRT tracker instance.
         return cv2.TrackerCSRT.create()
     
     def initialize(self, frame, box):
-        """Initialize tracker with a bounding box."""
+        # Initialize tracker with a bounding box.
         x1, y1, x2, y2 = box
         x, y, w, h = x1, y1, x2 - x1, y2 - y1
         
@@ -67,7 +196,7 @@ class TrackerManager:
             return False
     
     def update(self, frame):
-        """Update tracker and get predicted box."""
+        # Update tracker and get predicted box.
         if not self.has_tracker or self.tracker is None:
             self.predicted_box = None
             return
@@ -90,7 +219,7 @@ class TrackerManager:
             self.predicted_box = None
     
     def reinitialize_with_correction(self, frame, box):
-        """Reinitialize tracker with a corrected bounding box."""
+        # Reinitialize tracker with a corrected bounding box.
         x1, y1, x2, y2 = box
         x, y, w, h = x1, y1, x2 - x1, y2 - y1
         
@@ -101,9 +230,7 @@ class TrackerManager:
             corr_center = (x + w // 2, y + h // 2)
             distance = ((pred_center[0] - corr_center[0]) ** 2 + (pred_center[1] - corr_center[1]) ** 2) ** 0.5
             
-            if distance < 30:
-                print("Correction is minor, keeping current tracker state")
-                return
+
         
         # Reinitialize tracker
         self.tracker = self._create_tracker()
@@ -116,7 +243,7 @@ class TrackerManager:
 
 
 class AnnotationManager:
-    """Manages annotation data and file operations."""
+    # Manages annotation data and file operations.
     
     def __init__(self, annotations_file: str):
         self.annotations_file = annotations_file
@@ -124,7 +251,7 @@ class AnnotationManager:
         self.load_existing_annotations()
     
     def load_existing_annotations(self):
-        """Load existing annotations from file."""
+        # Load existing annotations from file.
         if os.path.exists(self.annotations_file):
             try:
                 with open(self.annotations_file, 'r') as f:
@@ -134,7 +261,7 @@ class AnnotationManager:
                 print(f"Warning: Could not load annotations file: {e}")
     
     def save_annotations(self):
-        """Save annotations to file."""
+        # Save annotations to file.
         try:
             with open(self.annotations_file, 'w') as f:
                 for annotation in self.annotations:
@@ -144,7 +271,7 @@ class AnnotationManager:
             print(f"Error saving annotations: {e}")
     
     def add_box_annotation(self, box: Tuple[int, int, int, int]) -> str:
-        """Convert box to annotation format and add to list."""
+        # Convert box to annotation format and add to list.
         x1, y1, x2, y2 = box
         x_center = (x1 + x2) // 2
         y_center = (y1 + y2) // 2
@@ -155,16 +282,16 @@ class AnnotationManager:
         return annotation
     
     def add_skip_annotation(self):
-        """Add skip annotation."""
+        # Add skip annotation.
         self.annotations.append("S -1 -1 -1 -1")
     
     def add_invisible_annotation(self):
-        """Add invisible annotation."""
+        # Add invisible annotation.
         self.annotations.append("I -1 -1 -1 -1")
 
 
 class DisplayManager:
-    """Manages frame display and drawing operations."""
+    # Manages frame display and drawing operations.
     
     def __init__(self, window_name: str, prompt: str):
         self.window_name = window_name
@@ -172,7 +299,7 @@ class DisplayManager:
     
     def create_text_overlay(self, frame, current_frame: int, total_frames: int, 
                            label_mode: bool, fix_mode: bool, has_prediction: bool):
-        """Add text overlay with instructions and frame info."""
+        # Add text overlay with instructions and frame info.
         frame_text = f"Frame: {current_frame + 1}/{total_frames}"
         
         # Build controls list dynamically based on available actions
@@ -239,7 +366,7 @@ class DisplayManager:
     
     def draw_boxes(self, frame, predicted_box=None, current_boxes=None, 
                    drawing_box=None, start_point=None, is_drawing=False):
-        """Draw all boxes on the frame."""
+        # Draw all boxes on the frame.
         if current_boxes is None:
             current_boxes = []
         
@@ -265,7 +392,7 @@ class DisplayManager:
                        label_mode: bool, fix_mode: bool, has_prediction: bool,
                        predicted_box=None, current_boxes=None, 
                        drawing_box=None, start_point=None, is_drawing=False):
-        """Single method to render all overlays and display the frame."""
+        # Single method to render all overlays and display the frame.
         # Start with a copy of the raw frame
         display_frame = raw_frame.copy()
         
@@ -283,10 +410,34 @@ class DisplayManager:
         
         # Display the final frame
         cv2.imshow(self.window_name, display_frame)
+    
+    def fast_drawing_update(self, raw_frame, predicted_box=None, current_boxes=None, drawing_box=None):
+        # Lightweight drawing update for smooth mouse feedback - skips expensive text overlays
+        display_frame = raw_frame.copy()
+        
+        # Draw only essential boxes for drawing feedback
+        if predicted_box:
+            x, y, w, h = predicted_box
+            cv2.rectangle(display_frame, (x, y), (x + w, y + h), (255, 0, 0), 2)  # Blue for prediction
+        
+        # Draw completed boxes (red)
+        if current_boxes:
+            for box in current_boxes:
+                cv2.rectangle(display_frame, (box[0], box[1]), (box[2], box[3]), (0, 0, 255), 2)
+        
+        # Draw current drawing box (red for active drawing)
+        if drawing_box:
+            cv2.rectangle(display_frame, (drawing_box[0], drawing_box[1]), (drawing_box[2], drawing_box[3]), (0, 0, 255), 2)
+            # Add center point for reference
+            center_x, center_y = (drawing_box[0] + drawing_box[2]) // 2, (drawing_box[1] + drawing_box[3]) // 2
+            cv2.circle(display_frame, (center_x, center_y), 3, (0, 0, 255), -1)
+        
+        # Quick display without text overlays
+        cv2.imshow(self.window_name, display_frame)
 
 
 class VideoAnnotator:
-    """Main class for video frame annotation."""
+    # Core video annotation logic and application coordination.
     
     def __init__(self, video_path: str, prompt: Optional[str] = None, annotations_file: Optional[str] = None):
         self.video_path = video_path
@@ -301,6 +452,7 @@ class VideoAnnotator:
         self.tracker_manager = TrackerManager()
         self.annotation_manager = AnnotationManager(annotations_file)
         self.display_manager = DisplayManager("Video Frame Annotator", self.prompt)
+        self.input_handler = InputHandler(self.handle_action)
         
         # Video properties
         self.current_frame = 0
@@ -312,14 +464,12 @@ class VideoAnnotator:
         self.fix_mode = False
         self.should_quit = False  # Flag for auto-quit on last frame
         
-        # Mouse drawing state
-        self.drawing = False
-        self.start_point = None
-        self.end_point = None
+        # Current annotation state
         self.current_boxes = []
+        self.current_drawing_box = None
     
     def initialize_video(self) -> bool:
-        """Initialize video capture and get properties."""
+        # Initialize video capture and get properties.
         if not os.path.exists(self.video_path):
             print(f"Error: Video file '{self.video_path}' does not exist.")
             return False
@@ -344,13 +494,13 @@ class VideoAnnotator:
         return True
     
     def get_current_frame(self):
-        """Get the current frame from video."""
+        # Get the current frame from video.
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.current_frame)
         ret, frame = self.cap.read()
         return frame if ret else None
     
     def next_frame(self):
-        """Move to next frame. Returns True if successful, False if at end."""
+        # Move to next frame. Returns True if successful, False if at end.
         if self.current_frame < self.total_frames - 1:
             self.current_frame += 1
             return True
@@ -359,7 +509,7 @@ class VideoAnnotator:
             return False
     
     def calculate_center_based_box(self, center_point, end_point):
-        """Calculate bounding box with center-based scaling."""
+        # Calculate bounding box with center-based scaling.
         cx, cy = center_point
         ex, ey = end_point
         
@@ -373,145 +523,39 @@ class VideoAnnotator:
         
         return (x1, y1, x2, y2)
     
-    def refresh_display(self):
-        """Refresh the display with current frame and overlays."""
-        raw_frame = self.get_current_frame()
-        if raw_frame is None:
-            return
-        
-        # Update tracker if available (but not during fix mode to avoid lag)
-        if self.tracker_manager.has_tracker and not self.fix_mode:
-            self.tracker_manager.update(raw_frame)
-        elif not self.tracker_manager.has_tracker:
-            self.tracker_manager.predicted_box = None
-        
-        # Calculate drawing box if currently drawing
-        drawing_box = None
-        if self.drawing and self.start_point and self.end_point:
-            drawing_box = self.calculate_center_based_box(self.start_point, self.end_point)
-        
-        # Render and display everything in one call
-        self.display_manager.render_and_show(
-            raw_frame=raw_frame,
-            current_frame=self.current_frame,
-            total_frames=self.total_frames,
-            label_mode=self.label_mode,
-            fix_mode=self.fix_mode,
-            has_prediction=self.tracker_manager.predicted_box is not None,
-            predicted_box=self.tracker_manager.predicted_box,
-            current_boxes=self.current_boxes,
-            drawing_box=drawing_box,
-            start_point=self.start_point,
-            is_drawing=self.drawing
-        )
-    
-    def handle_mouse_press(self, x, y):
-        """Handle mouse button press."""
-        if not self.label_mode and not self.fix_mode:
-            return
-        
-        self.drawing = True
-        self.start_point = (x, y)
-        self.end_point = (x, y)
-    
-    def handle_mouse_move(self, x, y):
-        """Handle mouse movement while drawing."""
-        if not self.drawing:
-            return
-        
-        self.end_point = (x, y)
-        # Simply refresh the display - the drawing box will be calculated automatically
-        self.refresh_display()
-    
-    def handle_mouse_release(self, x, y):
-        """Handle mouse button release."""
-        if not self.drawing:
-            return
-        
-        self.drawing = False
-        self.end_point = (x, y)
-        
-        # Calculate and add the completed box
-        if self.start_point and self.end_point:
-            box = self.calculate_center_based_box(self.start_point, self.end_point)
-            self.current_boxes.append(box)
-        
-        if self.fix_mode:
-            result = self._handle_fix_mode_completion()
-            if result is False:
-                self.should_quit = True
-        elif self.label_mode:
-            result = self._handle_label_mode_completion()
-            if result is False:
-                self.should_quit = True
-    
-    def _handle_fix_mode_completion(self):
-        """Handle completion of fix mode drawing. Returns False if should quit."""
-        if self.current_boxes:
-            for box in self.current_boxes:
-                self.annotation_manager.add_box_annotation(box)
-                
-                # Update tracker with correction
-                if self.tracker_manager.has_tracker:
-                    frame = self.get_current_frame()
-                    if frame is not None:
-                        self.tracker_manager.reinitialize_with_correction(frame, box)
+    def handle_action(self, action_type: str, data: dict):
+        # Central action handler - processes all user actions using match/case
+        match action_type:
+            # Core annotation actions (enum-based)
+            case ActionType.ENTER_LABEL_MODE.value:
+                self._handle_enter_label_mode()
+            case ActionType.ACCEPT_PREDICTION.value:
+                self._handle_accept_prediction()
+            case ActionType.FIX_PREDICTION.value:
+                self._handle_fix_prediction()
+            case ActionType.SKIP_FRAME.value:
+                self._handle_skip_frame()
+            case ActionType.MARK_INVISIBLE.value:
+                self._handle_mark_invisible()
+            case ActionType.QUIT.value:
+                self._handle_quit()
             
-            print(f"Frame {self.current_frame + 1}: FIXED and LABELED with {len(self.current_boxes)} box(es)")
-        
-        self.fix_mode = False
-        self.current_boxes = []
-        self.tracker_manager.predicted_box = None
-        
-        # Check if we should quit after moving to next frame
-        if not self.next_frame():
-            print("All frames completed. Quitting...")
-            return False
-        
-        self.refresh_display()
-        return True
-    
-    def _handle_label_mode_completion(self):
-        """Handle completion of label mode drawing. Returns False if should quit."""
-        if self.current_boxes:
-            for box in self.current_boxes:
-                self.annotation_manager.add_box_annotation(box)
-                
-                # Initialize tracker with first labeled box
-                if not self.tracker_manager.has_tracker:
-                    frame = self.get_current_frame()
-                    if frame is not None:
-                        self.tracker_manager.initialize(frame, box)
+            # Drawing actions (require data)
+            case ActionType.DRAW_BOX.value:
+                self._handle_draw_box(data)
+            case "DRAWING_STARTED":
+                self._handle_drawing_started(data)
+            case "DRAWING_UPDATED":
+                self._handle_drawing_updated(data)
             
-            print(f"Frame {self.current_frame + 1}: LABELED with {len(self.current_boxes)} box(es)")
-        
-        self.label_mode = False
-        self.current_boxes = []
-        
-        # Check if we should quit after moving to next frame
-        if not self.next_frame():
-            print("All frames completed. Quitting...")
-            return False
-        
-        self.refresh_display()
-        return True
+            # Special cases
+            case "UNKNOWN_KEY":
+                self._show_help_message()
+            case _:
+                print(f"Unknown action: {action_type}")
     
-    def mouse_callback(self, event, x, y, flags, param):
-        """Handle mouse events."""
-        if event == cv2.EVENT_LBUTTONDOWN:
-            self.handle_mouse_press(x, y)
-        elif event == cv2.EVENT_MOUSEMOVE:
-            self.handle_mouse_move(x, y)
-        elif event == cv2.EVENT_LBUTTONUP:
-            self.handle_mouse_release(x, y)
-    
-    def handle_key_quit(self) -> bool:
-        """Handle quit key press. Returns False to quit."""
-        print("Quitting...")
-        return False
-    
-    def handle_key_label(self):
-        """Handle label mode key press."""
+    def _handle_enter_label_mode(self):
+        # Handle entering label mode
         if not self.label_mode and not self.tracker_manager.predicted_box:
             self.label_mode = True
             self.current_boxes = []
@@ -522,8 +566,65 @@ class VideoAnnotator:
         else:
             print("Already in label mode.")
     
-    def handle_key_accept(self):
-        """Handle accept prediction key press. Returns False if should quit."""
+    def _handle_draw_box(self, data):
+        # Handle completed box drawing
+        if not self.label_mode and not self.fix_mode:
+            return
+        
+        start_point = data["start"]
+        end_point = data["end"]
+        
+        # Validate box size - prevent tiny/invalid boxes
+        min_box_size = 5  # Minimum 5 pixels in each dimension
+        distance_x = abs(end_point[0] - start_point[0])
+        distance_y = abs(end_point[1] - start_point[1])
+        
+        if distance_x < min_box_size or distance_y < min_box_size:
+            if self.fix_mode and self.tracker_manager.predicted_box:
+                # In fix mode with tiny box: keep the original prediction
+                print(f"Box too small ({distance_x}x{distance_y}), keeping original tracker prediction")
+                # Don't add new box, just complete with existing prediction
+                self._complete_fix_mode_with_original()
+                return
+            elif self.label_mode:
+                # In label mode with tiny box: ignore the draw attempt
+                print(f"Box too small ({distance_x}x{distance_y}), minimum size is {min_box_size}x{min_box_size} pixels")
+                return
+        
+        # Box is valid, proceed normally
+        box = self.calculate_center_based_box(start_point, end_point)
+        self.current_boxes.append(box)
+        
+        if self.fix_mode:
+            self._complete_fix_mode()
+        elif self.label_mode:
+            self._complete_label_mode()
+    
+    def _handle_drawing_started(self, data):
+        # Handle drawing started (for visual feedback)
+        if self.label_mode or self.fix_mode:
+            # Just refresh display to show drawing state
+            self.refresh_display()
+    
+    def _handle_drawing_updated(self, data):
+        # Handle drawing update (for real-time visual feedback)
+        if self.label_mode or self.fix_mode:
+            start_point = data["start"]
+            end_point = data["end"]
+            self.current_drawing_box = self.calculate_center_based_box(start_point, end_point)
+            
+            # Use lightweight drawing update for smooth performance
+            raw_frame = self.get_current_frame()
+            if raw_frame is not None:
+                self.display_manager.fast_drawing_update(
+                    raw_frame=raw_frame,
+                    predicted_box=self.tracker_manager.predicted_box,
+                    current_boxes=self.current_boxes,
+                    drawing_box=self.current_drawing_box
+                )
+    
+    def _handle_accept_prediction(self):
+        # Handle accepting prediction
         if self.tracker_manager.predicted_box and not self.label_mode and not self.fix_mode:
             x, y, w, h = self.tracker_manager.predicted_box
             box = (x, y, x + w, y + h)
@@ -535,29 +636,26 @@ class VideoAnnotator:
             # Check if we should quit after moving to next frame
             if not self.next_frame():
                 print("All frames completed. Quitting...")
-                return False
-            
-            self.refresh_display()
+                self.should_quit = True
+            else:
+                self.refresh_display()
         else:
             print("No prediction available to accept.")
-        
-        return True
     
-    def handle_key_fix(self):
-        """Handle fix prediction key press."""
+    def _handle_fix_prediction(self):
+        # Handle fixing prediction
         if self.tracker_manager.predicted_box and not self.label_mode and not self.fix_mode:
             self.fix_mode = True
             x, y, w, h = self.tracker_manager.predicted_box
             center_x, center_y = x + w // 2, y + h // 2
-            self.start_point = (center_x, center_y)
             self.current_boxes = [(x, y, x + w, y + h)]
             print(f"Frame {self.current_frame + 1}: ENTERING FIX MODE")
             self.refresh_display()
         else:
             print("No prediction available to fix.")
     
-    def handle_key_skip(self):
-        """Handle skip frame key press. Returns False if should quit."""
+    def _handle_skip_frame(self):
+        # Handle skipping frame
         if not self.label_mode and not self.fix_mode:
             self.annotation_manager.add_skip_annotation()
             print(f"Frame {self.current_frame + 1}: SKIPPED")
@@ -565,16 +663,14 @@ class VideoAnnotator:
             # Check if we should quit after moving to next frame
             if not self.next_frame():
                 print("All frames completed. Quitting...")
-                return False
-            
-            self.refresh_display()
+                self.should_quit = True
+            else:
+                self.refresh_display()
         else:
             print("Exit current mode first")
-        
-        return True
     
-    def handle_key_invisible(self):
-        """Handle invisible key press. Returns False if should quit."""
+    def _handle_mark_invisible(self):
+        # Handle marking frame as invisible
         if not self.label_mode and not self.fix_mode:
             self.annotation_manager.add_invisible_annotation()
             print(f"Frame {self.current_frame + 1}: MARKED AS INVISIBLE")
@@ -582,17 +678,119 @@ class VideoAnnotator:
             # Check if we should quit after moving to next frame
             if not self.next_frame():
                 print("All frames completed. Quitting...")
-                return False
-            
-            self.refresh_display()
+                self.should_quit = True
+            else:
+                self.refresh_display()
         else:
             print("Exit current mode first")
-        
-        return True
     
-    def process_frame(self) -> bool: # Process current frame and handle user input. Returns False to quit.
+    def _handle_quit(self):
+        # Handle quit action
+        self.should_quit = True
+        print("Quitting...")
+    
+    def _complete_fix_mode(self):
+        # Complete fix mode and process results
+        if self.current_boxes:
+            for box in self.current_boxes:
+                self.annotation_manager.add_box_annotation(box)
+                
+                # Update tracker with correction
+                if self.tracker_manager.has_tracker:
+                    frame = self.get_current_frame()
+                    if frame is not None:
+                        self.tracker_manager.reinitialize_with_correction(frame, box)
+            
+            print(f"Frame {self.current_frame + 1}: FIXED and LABELED with {len(self.current_boxes)} box")
         
-        # Check if we should quit due to mouse operations on last frame
+        self.fix_mode = False
+        self.current_boxes = []
+        self.current_drawing_box = None
+        self.tracker_manager.predicted_box = None
+        
+        # Check if we should quit after moving to next frame
+        if not self.next_frame():
+            print("All frames completed. Quitting...")
+            self.should_quit = True
+        else:
+            self.refresh_display()
+    
+    def _complete_fix_mode_with_original(self):
+        # Complete fix mode by keeping the original tracker prediction
+        if self.tracker_manager.predicted_box:
+            x, y, w, h = self.tracker_manager.predicted_box
+            box = (x, y, x + w, y + h)
+            self.annotation_manager.add_box_annotation(box)
+            print(f"Frame {self.current_frame + 1}: KEPT ORIGINAL PREDICTION {box}")
+        
+        self.fix_mode = False
+        self.current_boxes = []
+        self.current_drawing_box = None
+        self.tracker_manager.predicted_box = None
+        
+        # Check if we should quit after moving to next frame
+        if not self.next_frame():
+            print("All frames completed. Quitting...")
+            self.should_quit = True
+        else:
+            self.refresh_display()
+    
+    def _complete_label_mode(self):
+        # Complete label mode and process results
+        if self.current_boxes:
+            for box in self.current_boxes:
+                self.annotation_manager.add_box_annotation(box)
+                
+                # Initialize tracker with first labeled box
+                if not self.tracker_manager.has_tracker:
+                    frame = self.get_current_frame()
+                    if frame is not None:
+                        self.tracker_manager.initialize(frame, box)
+            
+            print(f"Frame {self.current_frame + 1}: LABELED with {len(self.current_boxes)} box")
+        
+        self.label_mode = False
+        self.current_boxes = []
+        self.current_drawing_box = None
+        
+        # Check if we should quit after moving to next frame
+        if not self.next_frame():
+            print("All frames completed. Quitting...")
+            self.should_quit = True
+        else:
+            self.refresh_display()
+    
+    def refresh_display(self):
+        # Refresh the display with current frame and overlays.
+        raw_frame = self.get_current_frame()
+        if raw_frame is None:
+            return
+        
+        # Update tracker if available (but not during fix mode to avoid lag)
+        if self.tracker_manager.has_tracker and not self.fix_mode:
+            self.tracker_manager.update(raw_frame)
+        elif not self.tracker_manager.has_tracker:
+            self.tracker_manager.predicted_box = None
+        
+        # Render and display everything in one call
+        self.display_manager.render_and_show(
+            raw_frame=raw_frame,
+            current_frame=self.current_frame,
+            total_frames=self.total_frames,
+            label_mode=self.label_mode,
+            fix_mode=self.fix_mode,
+            has_prediction=self.tracker_manager.predicted_box is not None,
+            predicted_box=self.tracker_manager.predicted_box,
+            current_boxes=self.current_boxes,
+            drawing_box=self.current_drawing_box,
+            start_point=None,  # Not needed with new architecture
+            is_drawing=self.current_drawing_box is not None
+        )
+    
+    def process_frame(self) -> bool:
+        # Process current frame and handle user input. Returns False to quit.
+        
+        # Check if we should quit
         if self.should_quit:
             return False
         
@@ -604,42 +802,13 @@ class VideoAnnotator:
         # Reset boxes for new frame if not in interactive mode
         if not self.label_mode:
             self.current_boxes = []
+            self.current_drawing_box = None
         
-        # Wait for key press (blocking - much simpler and more efficient!)
-        while True:
-            key = cv2.waitKey(50) & 0xFF  # 50ms = 20 checks/second
-        
-            # Check window closure
-            try:
-                if cv2.getWindowProperty(self.display_manager.window_name, cv2.WND_PROP_VISIBLE) < 1:
-                    return False
-            except cv2.error:
-                # Window was destroyed
-                return False
-            
-            if key != 255:  # Key pressed
-                break
-        # Handle keyboard input with clean dictionary dispatch
-        key_handlers = {
-            ord('q'): self.handle_key_quit, ord('Q'): self.handle_key_quit,
-            ord('l'): self.handle_key_label, ord('L'): self.handle_key_label,
-            ord('a'): self.handle_key_accept, ord('A'): self.handle_key_accept,
-            ord('f'): self.handle_key_fix, ord('F'): self.handle_key_fix,
-            ord('s'): self.handle_key_skip, ord('S'): self.handle_key_skip,
-            ord('i'): self.handle_key_invisible, ord('I'): self.handle_key_invisible,
-        }
-        
-        if key in key_handlers:
-            result = key_handlers[key]()
-            # Quit handler returns False, others return None
-            return False if result is False else True
-        else:
-            # Show help message for invalid keys
-            self._show_help_message()
-            return True
+        # Process input events (non-blocking with pollKey)
+        return self.input_handler.process_input_events(self.display_manager.window_name)
     
     def _show_help_message(self):
-        """Show help message for invalid keys based on current mode."""
+        # Show help message for invalid keys based on current mode.
         if self.label_mode:
             print("In label mode: Draw boxes with mouse")
         elif self.fix_mode:
@@ -650,13 +819,13 @@ class VideoAnnotator:
             print("Use L/l (Label), S/s (Skip), I/i (Invisible), or Q/q (Quit)")
     
     def run(self):
-        """Main annotation loop."""
+        # Main annotation loop.
         if not self.initialize_video():
             return False
         
         # Create window and set mouse callback
         cv2.namedWindow(self.display_manager.window_name, cv2.WINDOW_AUTOSIZE)
-        cv2.setMouseCallback(self.display_manager.window_name, self.mouse_callback)
+        cv2.setMouseCallback(self.display_manager.window_name, self.input_handler.handle_mouse_events)
         
         # Print startup information
         print("Starting annotation...")
@@ -676,10 +845,14 @@ class VideoAnnotator:
             # Display initial frame
             self.refresh_display()
             
-            # Main annotation loop
+            # Main annotation loop with pollKey (non-blocking)
             while True:
+                # Process input and check for quit
                 if not self.process_frame():
                     break
+                    
+                # Small delay to prevent excessive CPU usage (60 FPS equivalent)
+                time.sleep(1/60)  # ~16.67ms delay
             
             # Save annotations before exiting
             self.annotation_manager.save_annotations()
@@ -698,7 +871,7 @@ class VideoAnnotator:
 
 
 def main():
-    """Main entry point for the CLI tool."""
+    # Main entry point for the CLI tool.
     parser = argparse.ArgumentParser(
         description="Video Frame Annotation Tool",
         epilog="Example: python main.py video.mp4 --prompt 'Label objects:' --annotations output.json"
