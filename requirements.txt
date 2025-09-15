@@ -1,3 +1,7 @@
 opencv-contrib-python>=4.8.1.78
 numpy<2.0.0
 argparse
+
+# Optional AI dependencies for YOLO-World text detection
+# Uncomment to enable text detection features:
+ultralytics
